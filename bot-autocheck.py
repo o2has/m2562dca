@@ -70,8 +70,8 @@ def extract_data_from_message(text):
 
 def generate_random_data():
     balance = f"{random.uniform(10, 100):.2f}".replace(".", ",")
-    com_ton = f"{random.uniform(0.0033, 0.0035):.9f}"
-    com_dollar = f"{float(com_ton) * 3:.3f}"
+    com_ton = f"{random.uniform(0.0033, 0.0035):.9f}".replace(".", ",")
+    com_dollar = f"{float(com_ton) * 3:.3f}".replace(".", ",")
     base_tx = list("87d248ce")
     random.shuffle(base_tx)
     transaction = ''.join(base_tx)
