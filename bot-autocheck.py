@@ -10,9 +10,9 @@ import json
 from dotenv import load_dotenv
 import pytz
 from keep_alive import keep_alive
+import photo_edit
 
-load_dotenv()
-
+ 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
@@ -20,8 +20,13 @@ ADMIN_ID = int(os.getenv('ADMIN_ID'))
 
 bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
+get_percents = False
+data = None
+waiting_for_image = {}
+user_states = {}
 
 months = ["янв", "фев", "март", "апр", "май", "июнь", "июль", "авг", "сент", "окт", "нояб", "дек"]
+percents = 50
 
 def load_users_data():
     if not os.path.exists("users.json"):
@@ -78,13 +83,62 @@ def generate_random_data():
     random.shuffle(base_tx)
     transaction = ''.join(base_tx)
     return balance, com_ton, com_dollar, transaction
-
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
+    user = await event.get_sender()
+    users_data = load_users_data()
+    user_id = str(user.id)
+
+    is_new_user = user_id not in users_data
+    if is_new_user:
+        users_data[user_id] = {
+            "username": user.username or "без username",
+            "full_name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+            "checks_created": 0
+        }
+        save_users_data(users_data)
+
+        message_for_admin = (
+            f"👤 Новый пользователь запустил бота:\n"
+            f"Имя: {users_data[user_id]['full_name']}\n"
+            f"Username: @{users_data[user_id]['username']}\n"
+            f"ID: {user_id}"
+        )
+        try:
+            await bot.send_message(ADMIN_ID, message_for_admin)
+        except Exception as e:
+            print(f"Не удалось отправить сообщение админу: {e}")
+
+    await event.respond(
+        "Выберите систему:",
+        buttons=[Button.inline("Tonkeeper", b"tonkeeper")]
+    )
+
+@bot.on(events.CallbackQuery(data=b"tonkeeper"))
+async def tonkeeper_handler(event):
+    user_id = event.sender_id
+    user_states[user_id] = {'step': 'choose_method', 'data': {}}
+    await event.respond(
+        "Как вы хотите создать чек?",
+        buttons=[
+            [Button.inline("Ввести данные вручную", b"manual_input")],
+            [Button.inline("Переслать сообщение Giftpot", b"forward_message")]
+        ]
+    )
+    
+@bot.on(events.CallbackQuery(data=b"manual_input"))
+async def manual_input_handler(event):
+    user_id = event.sender_id
+    user_states[user_id] = {'step': 'ton_amount', 'data': {}}
+    await event.respond("Введите количество отправленных тонов:")
+
+@bot.on(events.CallbackQuery(data=b"forward_message"))
+async def forward_message_handler(event):
     await event.respond("Просто перешлите сообщение сделки гифтпот сюда.")
 
 @bot.on(events.NewMessage(forwards=True))
 async def forwarded_message_handler(event):
+    global data, get_percents
     text = event.raw_text
     ton_amount, address, comment = extract_data_from_message(text)
     balance, com_ton, com_dollar, transaction = generate_random_data()
@@ -99,11 +153,51 @@ async def forwarded_message_handler(event):
         'transaction': transaction
     }
 
-    await generate_and_send_check(event, data)
+    await event.respond("Введите количество процентов на скрине: ")
+    get_percents = True
+
+@bot.on(events.NewMessage)
+async def message_handler(event):
+    global get_percents, percents
+    
+    if get_percents and not event.forward:
+        percents = event.raw_text
+        get_percents = False
+        await generate_and_send_check(event, data, percents)
+        return
+    
+    user_id = event.sender_id
+    if user_id not in user_states:
+        return
+
+    state = user_states[user_id]
+    step = state['step']
+    text = event.raw_text.strip()
+
+    state['data'][step] = text
+
+    next_steps = {
+        'ton_amount': ('balance', "Введите ваш баланс (в долларах):"),
+        'balance': ('adress', "Введите адрес получателя (4 символа...4 символа):"),
+        'adress': ('comission_ton', "Введите комиссию в тонах:"),
+        'comission_ton': ('comission_dollar', "Введите комиссию в долларах:"),
+        'comission_dollar': ('comment', "Введите комментарий:"),
+        'comment': ('transaction', "Введите ID транзакции (например (25d91dca)):"),
+        'transaction': ('percents', "Введите количество процентов на скрине:"),
+    }
+
+    if step in next_steps:
+        next_step, prompt = next_steps[step]
+        state['step'] = next_step
+        await event.respond(prompt)
+    elif step == 'percents':
+        percents = text
+        await generate_and_send_check(event, state['data'], text)   
+        del user_states[user_id]
 
 global img
-async def generate_and_send_check(event, data):
-    img_path = "sample-tonkeeper.jpg"
+async def generate_and_send_check(event, data, percents=None):
+    img_path = "images/sample-tonkeeper.png"
     global img
     img = Image.open(img_path)
     draw = ImageDraw.Draw(img)
@@ -127,13 +221,24 @@ async def generate_and_send_check(event, data):
     draw_text_with_right_padding(draw, data['transaction'], 582.5, ImageFont.truetype("fonts/Montserrat-SemiBold.ttf", size=22), 142, (136,146,156,255))
     draw_text_with_right_padding(draw, data['comment'], 122, createfont(22), 326, (63,67,69,255))
 
-    arial = ImageFont.truetype("fonts/arialmt.ttf", size=21)
-    draw.text((22, 15), now.strftime("%H:%M"), font=arial, fill="white")
+    draw.text((32, 9), now.strftime("%H:%M"), font=ImageFont.truetype("fonts/SamsungSans-Regular.ttf", size=22), fill="white")
+    
+    percent_pos = (502, 9) if int(percents) >= 10 else (512, 9)
+    draw.text(percent_pos, percents + "%", font=ImageFont.truetype("fonts/SamsungSans-Regular.ttf", size=22), fill="white")
+    color = "white" if int(percents) >= 15 else "#e3511c"
+    draw.rectangle(
+        [(550, 28 - int(int(percents) / 100 * 11)), (559, 28)],
+        fill=color
+    )
 
     path = f"result_{event.sender_id}.jpg"
     img.save(path)
 
-    await event.respond("Ваш чек готов:", file=path)
+    buttons = None
+    if percents:
+        buttons = [Button.inline("Сделать скрин мультизадачности", b"multitask")]
+
+    await event.respond("Ваш чек готов:", file=path, buttons=buttons)
     os.remove(path)
 
     users_data = load_users_data()
@@ -142,7 +247,64 @@ async def generate_and_send_check(event, data):
         users_data[user_id]['checks_created'] += 1
         save_users_data(users_data)
 
+@bot.on(events.CallbackQuery(data=b"multitask"))
+async def on_multitask_button(event):
+    user_id = str(event.sender_id)
+    waiting_for_image[user_id] = True
+    await event.respond("Пожалуйста, отправьте второй скрин для многозадачности.")
+
+@bot.on(events.NewMessage(func=lambda e: e.photo))
+async def handle_photo(event):
+    user_id = str(event.sender_id)
+    if waiting_for_image.get(user_id):
+        waiting_for_image[user_id] = False
+
+        photo = await event.download_media()
+        multitask_path = f"images/screenshots/temp_{user_id}.jpg"
+        os.rename(photo, multitask_path)
+        second_screen = Image.open(multitask_path)
+        await generate_multitask_screen(event, second_screen)
+        os.remove(multitask_path)
+
+async def generate_multitask_screen(event, second_screen):
+    global img, percents
+    
+    base = Image.open("images/sample-multitask.png")
+    img = photo_edit.crop_image_top_bottom(img, 73)
+    img = photo_edit.resize_image(img, 40)
+    img = photo_edit.round_corners(img, 23)
+
+    base.paste(img, (117, 204), img)
+    img = base
+    
+    logo = Image.open("images/tonkeeper-logo.png")
+    logo = photo_edit.resize_image(logo, 76.5)
+    img.paste(logo, (224, 152), logo)
+    
+    second_screen = photo_edit.crop_image_top_bottom(second_screen, 73)
+    second_screen = photo_edit.resize_image(second_screen, 40)
+    second_screen = photo_edit.round_corners(second_screen, 23)
+    second_screen = photo_edit.resize_image(second_screen, 13.4)
+    
+    img.paste(second_screen, (-220, 249), second_screen)
+    
+    draw = ImageDraw.Draw(img)
+    moscow_tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(moscow_tz)
+    draw.text((32, 9), now.strftime("%H:%M"), font=ImageFont.truetype("fonts/SamsungSans-Regular.ttf", size=22), fill="white")
+    percent_pos = (502, 9) if int(percents) >= 10 else (512, 9)
+    draw.text(percent_pos, str(percents) + "%", font=ImageFont.truetype("fonts/SamsungSans-Regular.ttf", size=22), fill="white")
+    color = "white" if int(percents) >= 15 else "#e3511c"
+    draw.rectangle(
+        [(550, 30 - int(int(percents) / 100 * 11)), (558, 30)],
+        fill=color
+    )
+
+    path = f"result_{event.sender_id}.png"
+    base.save(path)
+    await event.reply(file=path)
+    os.remove(path)
+
 if __name__ == '__main__':
-    keep_alive()
     print("Бот запущен...")
     bot.run_until_disconnected()
