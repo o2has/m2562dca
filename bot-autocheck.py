@@ -12,7 +12,8 @@ import pytz
 from keep_alive import keep_alive
 import photo_edit
 
- 
+load_dotenv()
+
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
